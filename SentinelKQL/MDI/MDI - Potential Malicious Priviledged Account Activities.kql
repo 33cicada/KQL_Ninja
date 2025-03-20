@@ -1,0 +1,77 @@
+// Potential lateral movement path identified - This explicitly calls out a potential attack technique where adversaries move through a network after gaining initial access.
+// Private data retrieval - Could indicate data exfiltration attempts.
+// Security Group Created - While legitimate in normal operations, threat actors often create security groups to establish persistence.
+// Sensitive Dacl changed - Modifications to discretionary access control lists could indicate privilege escalation attempts.
+// Account Password Not Required changed - Removing password requirements is a common technique to weaken security controls.
+// Account disabled - Could be used to deny service or as part of covering tracks.
+// Account Delegation changed/Account Delegation Not Allowed changed - Could be used to enable credential theft attacks like Kerberoasting.
+// Account Password Never Expires changed - Often used to establish persistence.
+// SMB session - While not inherently malicious, SMB is frequently used in lateral movement and data exfiltration.
+// Task scheduling - Commonly used for persistence and privilege escalation.
+// Directory Services replication - Could be used for DCSync attacks to extract credentials.
+// Account Deleted changed - Restoring deleted accounts.
+// Define risk scores for potentially malicious action types
+let ActionTypeRiskScores = datatable(ActionType:string, RiskScore:int) [
+    // High risk activities (score 7-10)
+    "Potential lateral movement path identified", 10,
+    "Private data retrieval", 9,
+    "Sensitive Dacl changed", 8,
+    "Directory Services replication", 8, // Potential DCSync attack
+    "Account Password Not Required changed", 7,
+    // Medium-high risk activities (score 5-6)
+    "Security Group Created", 6,
+    "Account disabled", 6,
+    "Account Delegation changed", 6,
+    "Account Delegation Not Allowed changed", 6,
+    "Account Password Never Expires changed", 5,
+    "Task scheduling", 5,
+    "Account Deleted changed", 5,
+    // Medium risk activities (score 3-4)
+    "SMB session", 4,
+    "Group Policy was created", 4,
+    "Group Policy settings were changed", 4,
+    "Group Policy Display Name changed", 3,
+    "Account Password changed", 3,
+    "Account Name changed", 3,
+    // Lower risk activities (score 1-2)
+    "Account Expiry Time changed", 2,
+    "Account Des Encryption Only changed", 2,
+    "PrimaryGroupId has been changed", 2,
+    "Device dNSHostName changed", 1,
+    "Account Password expired", 1
+];
+// Calculate risk score for each event
+let ScoredEvents = IdentityDirectoryEvents
+| where ActionType has_any (ActionTypeRiskScores)
+    or ActionType has_any ("Account Password changed", "Account Name changed", "Device dNSHostName changed", "Account Expiry Time changed", "Account Des Encryption Only changed", "Group Policy was created", "Group Policy Display Name changed", "Group Policy settings were changed", "PrimaryGroupId has been changed", "Account Password expired")
+| where isnotempty(AccountName) and isnotempty(AccountDomain) and isnotempty(AccountUpn) // Filter out empty account fields
+| extend ActorDevice = AdditionalFields.["ACTOR.DEVICE"]
+| extend MITRE_Attack_Techniques = AdditionalFields.["AttackTechniques"]
+| lookup ActionTypeRiskScores on ActionType // Join with risk scores
+| extend RiskScore = iif(isempty(RiskScore), 1, RiskScore); // Default to 1 if no score defined
+// Apply account-based multiplier to events
+let EnrichedEvents = ScoredEvents
+| extend IsPrivilegedAccount = TargetAccountDisplayName has_any ("admin", "svc", "system", "root", "krbtgt") or AccountUpn has_any ("admin", "svc", "system")
+| extend PrivilegedMultiplier = iff(IsPrivilegedAccount, 1.5, 1.0) // Higher risk for privileged accounts
+| extend AdjustedRiskScore = RiskScore * PrivilegedMultiplier;
+// Consolidate events by AccountName and TimeGenerated (minute precision)
+EnrichedEvents
+| extend TimeGeneratedBin = bin(TimeGenerated, 1m) // Group by minute
+| summarize 
+    StartTime = min(TimeGenerated), 
+    EndTime = max(TimeGenerated), 
+    ActionTypes = make_set(ActionType), 
+    TotalBaseRiskScore = sum(RiskScore), 
+    AggregatedRiskScore = sum(AdjustedRiskScore), 
+    MITRE_Techniques = make_set_if(MITRE_Attack_Techniques, isnotempty(MITRE_Attack_Techniques)), 
+    TargetAccounts = make_set_if(TargetAccountDisplayName, isnotempty(TargetAccountDisplayName)), 
+    ActorDevices = make_set_if(ActorDevice, isnotempty(ActorDevice)), 
+    EventCount = count()
+    by AccountName, AccountDomain, AccountUpn, TimeGeneratedBin, IsPrivilegedAccount
+| where array_length(TargetAccounts) > 0 
+| where IsPrivilegedAccount == "true" 
+| where AggregatedRiskScore > 5 // Only show high-risk aggregated events
+| extend Duration = EndTime - StartTime
+| extend ActionCount = array_length(ActionTypes)
+| project TimeGenerated = StartTime, AccountName, AccountDomain, AccountUpn, TargetAccounts, IsPrivilegedAccount, EventCount, ActionCount, Duration, ActionTypes, TotalBaseRiskScore, AggregatedRiskScore = round(AggregatedRiskScore, 1), ActorDevices, MITRE_Techniques
+| sort by AggregatedRiskScore desc, TimeGenerated desc
