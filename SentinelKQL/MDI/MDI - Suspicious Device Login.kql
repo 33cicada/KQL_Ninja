@@ -1,4 +1,3 @@
-// To obtain results, comment out line 11, and uncomment line 12
 // Query to detect suspicious device names across multiple data sources
 let suspicious_device_names = dynamic([
     "kali",      // Kali Linux - common pentesting distribution
