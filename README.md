@@ -1,5 +1,5 @@
 # Microsoft Sentinel KQL Repository
-
+ 
 <p align="center">
   <img src="https://img.shields.io/badge/Azure-KQL-00B2FF.svg?logo=microsoftazure&style=for-the-badge">
   <img src="https://img.shields.io/badge/Sentinel-SIEM-0078D4.svg?logo=microsoftazure&style=for-the-badge">
