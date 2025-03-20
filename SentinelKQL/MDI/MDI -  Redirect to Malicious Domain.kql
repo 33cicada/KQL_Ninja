@@ -1,0 +1,93 @@
+//===================================================================================
+// URL Redirect Chain Detection and Analysis
+// Purpose: Detect and analyze potentially suspicious URL redirection chains
+// Severity: Medium - URL redirection chains can indicate phishing or malware delivery
+//===================================================================================
+// Configuration parameters
+let lookback_period = 7d;
+let min_redirect_count = 2;  // Minimum number of redirects to consider suspicious
+let max_url_sample = 10;    // Maximum number of URLs to include in the results
+let suspicious_domains = dynamic([
+    "bit.ly", "tinyurl.com", "goo.gl", "t.co", "rebrand.ly", "cutt.ly", "ow.ly", 
+    "is.gd", "buff.ly", "adf.ly", "tiny.cc", "shorturl.at"
+]);
+// Main query
+UrlClickEvents
+| where TimeGenerated > ago(lookback_period)
+// | where ActionType == "ClickAllowed" // Uncomment to filter by allowed clicks only
+| extend 
+    UrlChain = todynamic(UrlChain),
+    InitialUrl = Url,
+    IsClickedThrough = true
+| mv-expand UrlChain to typeof(string)
+| where InitialUrl != UrlChain  // Only look at redirects, not the initial URL
+| extend
+    RedirectUrl = tostring(UrlChain),
+    UrlDomain = extract("^https?://([^/]+)", 1, tostring(UrlChain))
+| extend 
+    // Check if URL contains any suspicious domain using compatible KQL syntax
+    LowercaseDomain = tolower(UrlDomain),
+    IsSuspiciousDomain = false
+| mv-apply SuspiciousDomain = suspicious_domains to typeof(string) on (
+    extend IsSuspiciousDomainTemp = LowercaseDomain has SuspiciousDomain
+    | extend IsSuspiciousDomain = IsSuspiciousDomain or IsSuspiciousDomainTemp
+)
+| project-away IsSuspiciousDomainTemp, LowercaseDomain
+| summarize
+    RedirectCount = dcount(RedirectUrl),
+    UniqueRedirectDomains = dcount(UrlDomain),
+    RedirectUrls = make_set(RedirectUrl, max_url_sample),
+    ContainsSuspiciousDomain = max(iif(IsSuspiciousDomain, 1, 0)),
+    LastClick = max(TimeGenerated)
+    by NetworkMessageId, InitialUrl, AccountUpn, IPAddress
+| where RedirectCount >= min_redirect_count
+| extend
+    ThreatScore = case(
+        RedirectCount > 5, 80,
+        RedirectCount > 3, 60,
+        ContainsSuspiciousDomain == 1, 70,
+        UniqueRedirectDomains > 2, 65,
+        50
+    )
+| join kind=inner (
+    UrlClickEvents
+    | where TimeGenerated > ago(lookback_period)
+    | project
+        NetworkMessageId,
+        ActionType,
+        TimeGenerated,
+        Url,
+        Workload,
+        IPAddress,
+        IsClickedThrough,
+        AccountUpn
+) on NetworkMessageId
+| where TimeGenerated == LastClick  // Get the details from the last click event
+| extend
+    ActionResult = case(
+        ActionType == "ClickBlocked", "Blocked",
+        ActionType == "ClickAllowed", "Allowed",
+        "Unknown"
+    ),
+    AlertSeverity = case(
+        ThreatScore >= 70, "High",
+        ThreatScore >= 50, "Medium",
+        "Low"
+    )
+| project
+    TimeGenerated,
+    AlertSeverity,
+    ThreatScore,
+    AccountUpn,
+    IPAddress,
+    ActionResult, 
+    InitialUrl,
+    Url,
+    RedirectCount,
+    UniqueRedirectDomains,
+    RedirectUrls,
+    ContainsSuspiciousDomain,
+    IsClickedThrough,
+    Workload,
+    NetworkMessageId
+| sort by ThreatScore desc, RedirectCount desc, TimeGenerated desc
