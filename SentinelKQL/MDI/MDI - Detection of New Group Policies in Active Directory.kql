@@ -1,0 +1,56 @@
+//===================================================================================
+// Group Policy Creation Monitoring
+// Purpose: Detect creation of new Group Policies in Active Directory
+// Severity: Medium - Group Policy creation may represent legitimate administration
+//          or potential privilege escalation/persistence
+//===================================================================================
+let lookback_period = 30d;
+let critical_gpo_keywords = dynamic([
+    "admin", "privilege", "backup", "password", "credential", "security", 
+    "firewall", "defender", "sentinel", "siem", "edr", "xdr", "trust", "domain"
+]);
+IdentityDirectoryEvents
+| where TimeGenerated > ago(lookback_period)
+| where ActionType == @"Group Policy was created"
+| extend 
+    // Parse additional fields for better context
+    GPOName = tostring(parse_json(AdditionalFields).GroupPolicyName),
+    ActorAccount = tostring(parse_json(AdditionalFields)["ACTOR.ACCOUNT"]),
+    ActorDomain = AccountDomain,
+    ActorUPN = AccountUpn,
+    TargetOU = tostring(parse_json(AdditionalFields).TargetOU),
+    DomainController = DestinationDeviceName
+| extend 
+    // Analyze GPO name for potential high-risk indicators
+    IsHighRiskGPO = array_length(
+        set_intersect(
+            critical_gpo_keywords, 
+            split(tolower(GPOName), " ")
+        )
+    ) > 0,
+    // Calculate time since creation for sorting/filtering
+    TimeSinceCreation = now() - TimeGenerated
+| extend 
+    RiskLevel = case(
+        IsHighRiskGPO, "High",
+        "Medium"
+    ),
+    RiskScore = case(
+        IsHighRiskGPO, 80,
+        50
+    )
+| project
+    TimeGenerated,
+    RiskLevel,
+    RiskScore,
+    GPOName,
+    ActorAccount,
+    ActorUPN,
+    ActorDomain,
+    TargetOU,
+    DomainController,
+    TimeSinceCreation,
+    ActorSID = AccountSid,
+    RawAdditionalFields = AdditionalFields,
+    ReportId
+| sort by TimeGenerated desc, RiskScore desc
