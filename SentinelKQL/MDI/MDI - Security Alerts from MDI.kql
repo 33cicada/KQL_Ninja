@@ -1,0 +1,54 @@
+// Microsoft Sentinel Query for Defender for Identity Suspicious Activities SecurityAlert
+SecurityAlert
+| where ProductName == "Azure Advanced Threat Protection"
+| extend ExternalId = tostring(parse_json(ExtendedProperties).ExternalId)
+| extend AttackName = DisplayName
+| where ExternalId in (
+    "2006", // Suspected DCSync attack (replication of directory services)
+    "2013", // Suspected Golden Ticket usage (forged authorization data)
+    "2017", // Suspected identity theft (pass-the-hash)
+    "2020", // Malicious request of Data Protection API master key
+    "2022", // Suspected Golden Ticket usage (time anomaly)
+    "2027", // Suspected Golden Ticket usage (nonexistent account)
+    "2028", // Suspected DCShadow attack (domain controller promotion)
+    "2029", // Suspected DCShadow attack (domain controller replication request)
+    "2030", // Data exfiltration over SMB
+    "2032", // Suspected Golden Ticket usage (ticket anomaly)
+    "2038", // Security principal reconnaissance (LDAP)
+    "2040", // Suspected Golden Ticket usage (ticket anomaly using RBCD)
+    "2047", // Suspected rogue Kerberos certificate usage
+    "2406", // Suspected SMB packet manipulation (CVE-2020-0796 exploitation)
+    "2410", // Suspected Kerberos SPN exposure
+    "2411", // Suspected Netlogon privilege elevation attempt (CVE-2020-1472 exploitation)
+    "2412", // Suspected AS-REP Roasting attack
+    "2413", // Suspected AD FS DKM key read
+    "2414", // Exchange Server Remote Code Execution (CVE-2021-26855)
+    "2415", // Suspected exploitation attempt on Windows Print Spooler service
+    "2416", // Suspicious network connection over Encrypting File System Remote Protocol
+    "2418", // Suspected suspicious Kerberos ticket request
+    "2419", // Suspicious modification of a sAMNameAccount attribute (CVE-2021-42278 and CVE-2021-42287 exploitation)
+    "2421", // Suspicious modification of a dNSHostName attribute (CVE-2022-26923)
+    "2422", // Suspicious Kerberos delegation attempt by a newly created computer
+    "2423", // Suspicious modification of the Resource Based Constrained Delegation attribute by a machine account
+    "2424", // Abnormal Active Directory Federation Services (AD FS) authentication using a suspicious certificate
+    "2425", // Suspicious certificate usage over Kerberos protocol (PKINIT)
+    "2426", // Suspected DFSCoerce attack using Distributed File System Protocol
+    "2427", // Honeytoken user attributes modified
+    "2428", // Honeytoken group membership changed
+    "2430", // Suspicious modification of domain AdminSdHolder
+    "2431", // Suspected account takeover using shadow credentials
+    "2432", // Suspicious Domain Controller certificate request (ESC8)
+    "1106"  // Suspected SID-History injection
+    )
+| project
+    TimeGenerated,
+    AttackName,
+    ExternalId,
+    AlertSeverity,
+    CompromisedEntity,
+    SourceComputerId,
+    Entities,
+    ResourceId,
+    VendorOriginalId,
+    ExtendedProperties
+| order by TimeGenerated desc
