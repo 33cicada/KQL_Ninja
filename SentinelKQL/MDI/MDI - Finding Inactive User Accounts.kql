@@ -1,0 +1,125 @@
+// The Alert is based on Risk categories : low, medium, high and critical where critical = Accounts that should be disabled but isn't
+let daysToSearch = 60d;
+let inactivePath = "Inactive-Users";
+let activePath = "Standard-Users";
+let maxInactiveDays = 90;
+let lookbackPeriod = 90d; 
+let AADUsers = materialize(
+    IdentityInfo
+    | where TimeGenerated > ago(7d)
+    | summarize arg_max(TimeGenerated, *) by AccountUPN
+    | project 
+        UserPrincipalName=AccountUPN, 
+        IsAccountEnabled, 
+        Department, 
+        JobTitle, 
+        EmployeeId, 
+        LastSeenDate, 
+        UserType
+);
+let LastSignIn = materialize(
+    SigninLogs
+    | where TimeGenerated > ago(lookbackPeriod)
+    | summarize LastSignInTime=max(TimeGenerated) by UserPrincipalName
+);
+let toInactive = (
+    IdentityDirectoryEvents  
+    | where TimeGenerated >= ago(60d) 
+    | where isnotempty(TargetAccountUpn)  
+    | extend 
+        InactiveOU = tostring(AdditionalFields.["TO Account Path"]),
+        ActorAccount = tostring(AdditionalFields.["ACTOR.ACCOUNT"])
+    | where InactiveOU contains inactivePath 
+    | summarize arg_max(TimeGenerated, *) by TargetAccountUpn   
+    | project 
+        InactiveDate=TimeGenerated, 
+        TargetAccountUpn, 
+        TargetAccountDisplayName, 
+        DisabledBy=ActorAccount,
+        DestinationDeviceName
+);
+let fromInactive = (
+    IdentityDirectoryEvents 
+    | where TimeGenerated >= ago(60d)
+    | where isnotempty(TargetAccountUpn)  
+    | extend 
+        InactiveOU = tostring(AdditionalFields.["FROM Account Path"]), 
+        ActiveOU = tostring(AdditionalFields.["TO Account Path"]),
+        ActorAccount = tostring(AdditionalFields.["ACTOR.ACCOUNT"])
+    | where InactiveOU contains inactivePath and ActiveOU contains activePath 
+    | summarize arg_max(TimeGenerated, *) by TargetAccountUpn  
+    | project 
+        ActiveDate=TimeGenerated, 
+        TargetAccountUpn, 
+        EnabledBy=ActorAccount,
+        EnabledOnDevice=DestinationDeviceName
+);
+let accessChanges = (
+    IdentityDirectoryEvents
+    | where TimeGenerated >= ago(60d)
+    | where ActionType == "Group Membership changed"
+    | where isnotempty(TargetAccountUpn)
+    | extend 
+        GroupName = iff(
+            isnotempty(tostring(parse_json(AdditionalFields).["TO.GROUP"])), 
+            tostring(parse_json(AdditionalFields).["TO.GROUP"]), 
+            tostring(parse_json(AdditionalFields).["FROM.GROUP"])
+        ),
+        Action = iff(
+            isnotempty(tostring(parse_json(AdditionalFields).["TO.GROUP"])), 
+            "Added", 
+            "Removed"
+        ),
+        Actor = tostring(AdditionalFields.["ACTOR.ACCOUNT"])
+    | project 
+        TimeGenerated, 
+        TargetAccountUpn, 
+        Action, 
+        GroupName, 
+        Actor
+    | summarize 
+        GroupChanges=make_list(pack("Time", TimeGenerated, "Action", Action, "Group", GroupName, "Actor", Actor)) 
+        by TargetAccountUpn
+);
+toInactive 
+| join kind=leftouter fromInactive on TargetAccountUpn 
+| join kind=leftouter AADUsers on $left.TargetAccountUpn == $right.UserPrincipalName
+| join kind=leftouter LastSignIn on $left.TargetAccountUpn == $right.UserPrincipalName
+| join kind=leftouter accessChanges on TargetAccountUpn
+| extend 
+    ActiveDate = iff(InactiveDate > ActiveDate, datetime(null), ActiveDate),
+    DaysInactive = iff(isnull(ActiveDate), datetime_diff('day', now(), InactiveDate), int(null)),
+    DaysSinceLastSignIn = iff(isnull(LastSignInTime), int(null), datetime_diff('day', now(), LastSignInTime))
+| extend
+    RiskLevel = case(
+        DaysInactive > maxInactiveDays, "High",
+        IsAccountEnabled == true and isnotempty(DaysInactive), "Critical",
+        isnotempty(GroupChanges) and array_length(GroupChanges) > 3, "Medium",
+        "Low"
+    ),
+    AccountStatus = case(
+        isnotempty(ActiveDate), "Reactivated",
+        IsAccountEnabled == true, "Inactive But Enabled",
+        "Properly Disabled"
+    )
+| where isnotempty(DaysInactive)
+//| where AccountStatus != "Properly Disabled"
+| project 
+    RiskLevel,
+    AccountStatus,
+    InactiveDate,
+    TargetAccountDisplayName, 
+    TargetAccountUpn, 
+    DaysInactive,
+    Department,
+    JobTitle,
+    DisabledBy,
+    DaysSinceLastSignIn,
+    LastSignInTime,
+    GroupChanges = iff(isempty(GroupChanges), dynamic([]), GroupChanges),
+    IsAccountEnabled,
+    ActiveDate,
+    EnabledBy
+| sort by 
+    RiskLevel asc, 
+    DaysInactive desc
