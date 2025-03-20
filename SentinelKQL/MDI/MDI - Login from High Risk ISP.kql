@@ -1,0 +1,83 @@
+// High Risk ISP list from https://scamalytics.com/ip/isp
+let riskyISP = dynamic([
+    "Vodafone Ghana IP Service", "Scancom [MTNGhana] Mobile Subscribers", "Vodafone Ghana MBB", "Scancom Limited", 
+    "Airtel Ghana Limited", "Fixed Broadband dynamic", "Vodafone Ghana AS International Transit", "Vodafone Ghana", 
+    "Airtel Networks Limited", "Globacom-Limited", "Luli Fibra Cable Solution Limited", "MTN NIGERIA", 
+    "Globacom Limited", "MTN NIGERIA Communication limited", "Emerging Markets Telecommunication Services (EMTS) Limited", 
+    "I4W - Web Solutions", "7Global Ltd", "Atlantic.net, Inc.", "Vantiva USA Shared Services Inc.", "Daniel Jackson", 
+    "SEVENSPACE, NYC", "Atlantic.net", "ZERO2INFINITYNET", "Kamatera", "Kamatera, Inc.", "20 Point Networks LLC", 
+    "Madgenius.com", "UpCloud USA Inc", "InMotion Hosting, Inc.", "Edgoo Networks", "Charles River Operation", 
+    "CORE-BACKBONE", "Nocix, LLC", "Paradise Networks LLC", "QuadraNet Enterprises LLC", "M247 Europe SRL", "Velcom", 
+    "Albanian Fiber Telecommunications SHPK", "New York Network", "OVH US LLC", "DigitalOcean, LLC", "Choopa", 
+    "1515 ROUNDTABLE DR PROPERTY, LLC", "GloboTech Communications", "Informacines sistemos ir technologijos, UAB", 
+    "SKYNODE", "FDCservers.net", "INCX Global, LLC", "Tomas Oliveira Valente Leite de Castro", "DIGITALOCEAN", 
+    "PVDataNet AB", "Korea Telecom", "Oracle Corporation", "Performive LLC", "WholeSale Internet", "Noop", 
+    "SoftEther", "AxcelX Technologies LLC", "24 SHELLS", "Total Server Solutions L.L.C", "GTHost", 
+    "Servers Australia Pty. Ltd", "Cloudfanatic.NET", "Active Data", "Latitude.sh", "VirtualShield LLC", 
+    "Nubes, LLC", "Cogent Communications", "OVH SAS", "The Constant Company", "LogicWeb Inc", "Dedicated.com", 
+    "Skyvision Networks Services", "Zenlayer Inc", "Hivelocity Inc", "NFOrce Entertainment BV", "H4Y Technologies LLC", 
+    "Linode", "FasthostInternet Ltd", "Interconnects", "tzulo, inc.", "Ipxo LLC", "Strong Technology", "IONOS SE", 
+    "Iomart Hosting Ltd", "Nexeon Technologies", "Datacamp Limited", "HostRoyale Technologies Pvt Ltd", 
+    "M247 Europe Infra", "Web2Objects LLC", "GLOBALTELEHOST Corp.", "IOMART", "TTI", "HugeServer Networks, LLC", 
+    "Clouvider Limited", "Oculus Networks Inc", "Hydra Communications Ltd", "M247 Europe", "Netminders Server Hosting"
+    ]);
+// Define time window for analysis (adjust as needed)
+let timeWindow = 1d;
+// Define your start time
+let startTime = ago(timeWindow);
+// Main query
+IdentityLogonEvents
+| where TimeGenerated > startTime
+| where ISP in~ (riskyISP)
+| extend IsSuspiciousAction = 
+    (ActionType has "OldPassword") or 
+    (FailureReason has "WrongPassword") or 
+    (FailureReason has "validating credentials due to invalid username or password.") or 
+    (FailureReason has "The account is locked, you've tried to sign in too many times with an incorrect user ID or password.") or 
+    (FailureReason has "Authentication failed.") or 
+    (FailureReason has "UnknownUser") or 
+    (FailureReason has "The user account is disabled.")
+| extend IsSuccessfulLogin = (ActionType has "LogonSuccess")
+| extend IsIssueLogin = 
+    (FailureReason has "The session is not valid due to password expiration or recent password change.") or 
+    (FailureReason has "General failure")
+| summarize 
+    StartTime = min(TimeGenerated),
+    EndTime = max(TimeGenerated),
+    Different_IPs = make_set(IPAddress), 
+    Total_different_IPs = dcount(IPAddress),
+    First_Attempt = min(TimeGenerated),
+    Last_Attempt = max(TimeGenerated),
+    Total_sign_attempts = count(), 
+    Suspicious_Sign_attempt = countif(IsSuspiciousAction), 
+    Success_Sign_attempt = countif(IsSuccessfulLogin),
+    Issues_Sign_attempt = countif(IsIssueLogin),
+    Users_Targeted = dcount(AccountUpn),
+    User_List = make_set(AccountUpn)
+    by ISP, Location
+| extend 
+    SuspiciousRatio = Suspicious_Sign_attempt * 1.0 / Total_sign_attempts, 
+    ValidRatio = Success_Sign_attempt * 1.0 / Total_sign_attempts, 
+    IssuesRatio = Issues_Sign_attempt * 1.0 / Total_sign_attempts,
+    Duration = Last_Attempt - First_Attempt,
+    AttemptsPerUser = round(Total_sign_attempts * 1.0 / Users_Targeted, 2)
+| extend 
+    SuspiciousPercentage = round(SuspiciousRatio * 100, 2), 
+    ValidPercentage = round(ValidRatio * 100, 2), 
+    IssuesPercentage = round(IssuesRatio * 100, 2)
+| project 
+    StartTime,
+    EndTime,
+    ISP,
+    Location,
+    Total_sign_attempts,
+    Total_different_IPs, 
+    SuspiciousPercentage,
+    ValidPercentage,
+    IssuesPercentage, 
+    Users_Targeted,
+    AttemptsPerUser,
+    Duration,
+    User_List,
+    Different_IPs
+| order by SuspiciousPercentage desc
