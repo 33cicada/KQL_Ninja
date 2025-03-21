@@ -1,0 +1,48 @@
+// Define known administrative domains (add more as needed)
+let ADAdministrator = dynamic(["admin"]);
+// Define threshold for suspicious query volume
+let QueryCountThreshold = 500;
+// Lookback period for analysis
+let timeframe = 12d;
+IdentityQueryEvents
+| where TimeGenerated > ago(timeframe)
+| where isnotempty(TargetAccountDisplayName)
+| where ActionType == "LDAP query"
+| where QueryType == "AllObjects"
+// Extract LDAP query count from AdditionalFields JSON
+| extend LDAPQueryCount = toint(parse_json(AdditionalFields)["Count"])
+// Filter for high-volume queries that might indicate directory harvesting
+| where LDAPQueryCount > QueryCountThreshold
+// Exclude known administrative accounts by domain
+| where not (TargetAccountUpn has_any(ADAdministrator))
+// Extract useful fields from AdditionalFields
+| extend QueryTarget = tostring(parse_json(AdditionalFields)["Filter"])
+| extend QueryTree = tostring(parse_json(AdditionalFields)["SearchTree"])
+| extend DeviceName = tostring(parse_json(AdditionalFields)["DeviceName"])
+| extend IPAddress = tostring(parse_json(AdditionalFields)["IPAddress"])
+| extend QueryScope = tostring(parse_json(AdditionalFields)["Scope"])
+// Add calculated field for risk assessment
+| extend RiskScore = case(
+    LDAPQueryCount > 2000, "Critical",
+    LDAPQueryCount > 1000, "High",
+    LDAPQueryCount > 500, "Medium",
+    "Low"
+  )
+// Project relevant columns for analysis
+| project-reorder
+    TimeGenerated,
+    RiskScore,
+    AccountDisplayName,
+    AccountName,
+    TargetAccountDisplayName,
+    TargetAccountUpn,
+    LDAPQueryCount,
+    QueryTarget,
+    QueryTree,
+    QueryScope,
+    Application,
+    Protocol,
+    DeviceName,
+    IPAddress,
+    AdditionalFields
+| sort by TimeGenerated desc, LDAPQueryCount desc
