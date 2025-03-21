@@ -1,0 +1,214 @@
+// Comprehensive Domain Controller Discovery Query
+// Timeframe for historical data, add more time for a more comprehensive discovery
+let lookback = 30d;
+// Find DCs from SAMR operations (usually user/computer account queries)
+let SamrDC =
+    IdentityQueryEvents
+    | where TimeGenerated > ago(lookback)
+    | where isnotempty(DestinationDeviceName) and DestinationDeviceName != ""
+    | where ActionType == "SAMR query"
+    | extend Source = "SAMR Query"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from DNS records for Kerberos service
+let DnsDC =
+    DnsEvents
+    | where TimeGenerated > ago(lookback)
+    | where Name matches regex @"_kerberos\.[^.]+\..*"
+    | extend 
+        DestinationDeviceName = tolower(Computer),
+        DeviceName = tolower(Computer),
+        Protocol = "DNS",
+        ActionType = "DNS Query",
+        QueryTarget = Name,
+        Query = Name,
+        TargetAccountDisplayName = ""
+    | extend Source = "DNS Kerberos Records"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from SRV record queries for Kerberos
+let SrvDC =
+    IdentityQueryEvents
+    | where TimeGenerated > ago(lookback)
+    | where QueryType == "Srv"
+    | where QueryTarget matches regex @"_kerberos\.[^.]+\..*"
+    | extend Source = "SRV Kerberos Queries"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from Directory Replication events
+let DirectoryReplicationDC =
+    IdentityDirectoryEvents
+    | where TimeGenerated > ago(lookback)
+    | where ActionType in ("Directory Services replication")
+    // Exclude Azure AD Connect servers
+    | where isnotempty(AccountName) and isnotempty(DestinationDeviceName)
+    | extend 
+        Protocol = "LDAP",
+        QueryTarget = iff(isempty(TargetDeviceName), "", TargetDeviceName),
+        Query = strcat("Replication from ", DeviceName, " to ", DestinationDeviceName)
+    | extend Source = "Directory Replication"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from LDAP queries typically performed against DCs
+let LdapDC =
+    IdentityQueryEvents
+    | where TimeGenerated > ago(lookback)
+    | where Protocol == "Ldap"
+    | where isnotempty(DestinationDeviceName) and DestinationDeviceName != ""
+    | extend Source = "LDAP Queries"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from Kerberos authentication events
+let KerberosDC =
+    SecurityEvent
+    | where TimeGenerated > ago(lookback)
+    | where EventID in (4768, 4769, 4771)
+    | extend 
+        DestinationDeviceName = tolower(Computer),
+        DeviceName = tolower(Computer),
+        Protocol = "Kerberos",
+        ActionType = case(
+            EventID == 4768, "TGT Request",
+            EventID == 4769, "TGS Request",
+            EventID == 4771, "Kerberos Pre-Auth Failed",
+            "Kerberos Auth"
+        ),
+        QueryTarget = TargetUserName,
+        Query = Activity,
+        TargetAccountDisplayName = TargetUserName
+    | extend Source = "Kerberos Authentication"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from Windows Security logs specific to DCs
+let SecurityDC =
+    SecurityEvent
+    | where TimeGenerated > ago(lookback)
+    | where EventID in (4742, 4741, 4740, 4724)  // Account management events typically on DCs
+    | extend 
+        DestinationDeviceName = tolower(Computer),
+        DeviceName = tolower(Computer),
+        Protocol = "LSASS",
+        ActionType = Activity,
+        QueryTarget = TargetUserName,
+        Query = Activity,
+        TargetAccountDisplayName = TargetUserName
+    | extend Source = "Security Events"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Find DCs from NTLM authentication events
+let NtlmDC =
+    SecurityEvent
+    | where TimeGenerated > ago(lookback)
+    | where EventID == 4776  // NTLM authentication
+    | extend 
+        DestinationDeviceName = tolower(Computer),
+        DeviceName = tolower(Computer),
+        Protocol = "NTLM",
+        ActionType = "NTLM Authentication",
+        QueryTarget = TargetUserName,
+        Query = strcat("NTLM auth for ", TargetUserName),
+        TargetAccountDisplayName = TargetUserName
+    | extend Source = "NTLM Authentication"
+    | project 
+        TimeGenerated,
+        DestinationDeviceName,
+        DeviceName,
+        Protocol,
+        ActionType,
+        QueryTarget,
+        Query,
+        TargetAccountDisplayName,
+        Source;
+// Combine all sources and keep all the requested fields
+union isfuzzy=true SamrDC, DnsDC, SrvDC, DirectoryReplicationDC, LdapDC, KerberosDC, SecurityDC, NtlmDC
+| summarize 
+    arg_max(TimeGenerated, *),
+    DetectionCount = count(),
+    FirstSeen = min(TimeGenerated),
+    LastSeen = max(TimeGenerated),
+    ActionTypes = make_set(ActionType),
+    Protocols = make_set(Protocol),
+    QueryTargets = make_set(QueryTarget, 10),
+    Queries = make_set(Query, 5),
+    TargetAccounts = make_set(TargetAccountDisplayName, 10),
+    Sources = make_set(Source) 
+    by DestinationDeviceName
+| extend 
+    DetectionConfidence = array_length(Sources),
+    Domain = iff(
+        DestinationDeviceName contains ".", 
+        tostring(split(DestinationDeviceName, ".")[1]), 
+        "Unknown"
+    )
+| project-reorder
+    TimeGenerated,
+    DestinationDeviceName,
+    Domain,
+    DeviceName,
+    DetectionConfidence,
+    FirstSeen,
+    LastSeen,
+    DetectionCount,
+    Protocols,
+    ActionTypes,
+    QueryTargets,
+    Queries,
+    TargetAccounts,
+    Sources
+| order by DetectionConfidence desc, LastSeen desc
