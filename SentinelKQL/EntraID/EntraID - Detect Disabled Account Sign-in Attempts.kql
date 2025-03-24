@@ -1,0 +1,55 @@
+// Disabled Account Sign-in Attempts
+SigninLogs 
+| where TimeGenerated > ago(1d) 
+| where ResultType == 50057 // "User account is disabled"
+// Collect relevant data points
+| extend 
+    Location = tostring(LocationDetails.countryOrRegion), 
+    City = tostring(LocationDetails.city), 
+    UserAgent = tostring(UserAgent), 
+    ClientAppUsed = tostring(ClientAppUsed), 
+    DeviceDetail = tostring(DeviceDetail)
+// Group by time windows to identify patterns
+| summarize 
+    AttemptCount = count(), 
+    ApplicationsTargeted = make_set(AppDisplayName, 10), 
+    IPAddresses = make_set(IPAddress, 10), 
+    Locations = make_set(Location, 10), 
+    Cities = make_set(City, 10), 
+    UserAgents = make_set(UserAgent, 5), 
+    ClientApps = make_set(ClientAppUsed, 5), 
+    Devices = make_set(DeviceDetail, 5), 
+    LatestAttemptTime = max(TimeGenerated), 
+    FirstAttemptTime = min(TimeGenerated), 
+    TimeSpan = datetime_diff('minute', max(TimeGenerated), min(TimeGenerated)) 
+    by UserPrincipalName, bin(TimeGenerated, 1h) 
+// Focus on accounts with multiple attempts indicating potential attack
+| where AttemptCount >= 3 
+// Calculate attempts per minute to detect high-frequency attacks
+| extend AttemptsPerMinute = iff(TimeSpan == 0, toreal(AttemptCount), round(1.0 * AttemptCount / TimeSpan, 2)) 
+// Assess risk level based on attempt frequency and variety of sources
+| extend RiskLevel = case(
+    AttemptsPerMinute > 10, "High", 
+    AttemptsPerMinute > 5, "Medium", 
+    array_length(IPAddresses) > 3, "Medium", 
+    "Low"
+)
+// Final output with renamed fields for clarity
+| project 
+    WindowStart = TimeGenerated, 
+    WindowEnd = datetime_add('hour', 1, TimeGenerated), 
+    DisabledAccountName = UserPrincipalName, 
+    AttemptCount, 
+    AttemptsPerMinute, 
+    TimeSpanMinutes = TimeSpan, 
+    FirstAttempt = FirstAttemptTime, 
+    LatestAttempt = LatestAttemptTime, 
+    RiskLevel, 
+    ApplicationsTargeted, 
+    IPAddresses, 
+    Locations, 
+    Cities, 
+    UserAgents, 
+    ClientApps, 
+    Devices 
+| order by RiskLevel, AttemptCount desc
