@@ -1,0 +1,67 @@
+//This query monitors Conditional Access policy changes over the past 7 days to detect potentially risky security modifications using Risk approach.
+let timeframe = 14d;
+let high_risk_operations = dynamic(["Delete policy", "Update conditional access policy", "Add service principal to role", "Add member to group"]);
+let admin_roles = dynamic(["Global Administrator", "Security Administrator", "Conditional Access Administrator", "Identity Governance Administrator"]);
+AuditLogs
+| where TimeGenerated > ago(timeframe)
+| where Category == "Policy"
+| where OperationName has_any ("Update policy", "Add policy", "Delete policy")
+| where TargetResources has "conditionalAccessPolicy"
+| extend 
+    PolicyName = tostring(TargetResources[0].displayName),
+    PolicyId = tostring(TargetResources[0].id),
+    PolicyModification = tostring(TargetResources[0].modifiedProperties),
+    ModifiedBy = iif(isempty(InitiatedBy.user.userPrincipalName), tostring(InitiatedBy.app.displayName), tostring(InitiatedBy.user.userPrincipalName)),
+    ModifierType = iif(isempty(InitiatedBy.user.userPrincipalName), "Application", "User"),
+    ModifierID = iif(isempty(InitiatedBy.user.id), tostring(InitiatedBy.app.servicePrincipalId), tostring(InitiatedBy.user.id)),
+    ModifierIPAddress = tostring(InitiatedBy.user.ipAddress),
+    ModifierRoles = tostring(InitiatedBy.user.roles),
+    ModificationType = OperationName,
+    Result = ResultDescription
+| extend
+    HasExcludedUsers = PolicyModification has "excludes" and PolicyModification has "users",
+    HasExcludedGroups = PolicyModification has "excludes" and PolicyModification has "groups",
+    HasReducedConditions = PolicyModification has "conditions" and (PolicyModification has "remove" or PolicyModification has "disabled"),
+    HasChangedGrantControls = PolicyModification has "grantControls",
+    HasChangedSessionControls = PolicyModification has "sessionControls",
+    IsMFAReduced = PolicyModification has "strongAuthentication" and (PolicyModification has "disabled" or PolicyModification has "remove"),
+    HasAdminRole = ModifierRoles has_any (admin_roles),
+    CurrentHour = hourofday(TimeGenerated),
+    CurrentDay = dayofweek(TimeGenerated)
+| extend 
+    IsBusinessHours = CurrentHour >= 8 and CurrentHour <= 18,
+    IsWeekday = CurrentDay != 0 and CurrentDay != 6,
+    IsHighRiskOperation = ModificationType in (high_risk_operations),
+    IsNonAdminChange = HasAdminRole == false
+| extend
+    SecurityRelevantChanges = case(
+        IsMFAReduced, "MFA requirement weakened",
+        HasExcludedUsers, "Added user exclusions",
+        HasExcludedGroups, "Added group exclusions",
+        HasReducedConditions, "Reduced security conditions",
+        ModificationType has "Delete", "Policy deleted",
+        HasChangedGrantControls, "Modified authentication requirements",
+        HasChangedSessionControls, "Modified session controls",
+        "Other changes"),
+    IsWeekendOrAfterHours = IsBusinessHours == false or IsWeekday == false
+| extend 
+    AlertSeverity = case(
+        IsMFAReduced or (HasExcludedUsers and IsNonAdminChange), "High",
+        HasReducedConditions or IsHighRiskOperation or (IsNonAdminChange and IsWeekendOrAfterHours), "Medium",
+        "Low")
+| project
+    TimeGenerated,
+    AlertSeverity,
+    ModificationType,
+    SecurityRelevantChanges,
+    PolicyName,
+    ModifiedBy,
+    ModifierType,
+    ModifierRoles,
+    ModifierIPAddress,
+    IsWeekendOrAfterHours,
+    Result,
+    PolicyId,
+    PolicyModification,
+    CorrelationId
+| order by AlertSeverity, TimeGenerated desc
