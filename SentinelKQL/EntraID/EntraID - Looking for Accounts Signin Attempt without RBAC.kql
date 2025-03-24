@@ -1,0 +1,74 @@
+//This query is designed to detect potentially suspicious login patterns by analyzing SigninLogs the last 24 hours compared to a 14-day baseline. 
+let lookback = 14d;
+let threshold_location = 3;
+let threshold_ip = 10;
+let threshold_useragent = 7;
+let vipUsers = dynamic(["abc@example.com"]); // THis is just an example, replace with real VIP info
+let historicalLocations = 
+   SigninLogs
+   | where TimeGenerated between(ago(lookback) .. ago(1d))
+   | where ResultType == 0
+   | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+   | extend Country = tostring(LocationDetails.countryOrRegion)
+   | summarize Countries = make_set(Country) by UserPrincipalName;
+let historicalHours = 
+   SigninLogs
+   | where TimeGenerated between(ago(lookback) .. ago(1d))
+   | where ResultType == 0
+   | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+   | extend Hour = datetime_part("hour", TimeGenerated)
+   | summarize LoginHours = make_set(Hour) by UserPrincipalName;
+SigninLogs
+| where Identity !contains ".13" and Identity !contains ".14"
+| where TimeGenerated > ago(1d)
+| where ResultType == 0
+| extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+| extend UserId = tostring(parse_json(Identity).userId)
+| extend isVIP = UserPrincipalName in~ (vipUsers)
+| extend City = tostring(LocationDetails.city)
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| extend Browser = tostring(DeviceDetail.browser)
+| extend OS = tostring(DeviceDetail.operatingSystem)
+| extend UserAgent = tostring(UserAgent)
+| extend Hour = datetime_part("hour", TimeGenerated)
+| extend EasternHour = ((Hour - 5) + 24) % 24
+| join kind=leftouter (historicalLocations) on UserPrincipalName
+| extend UnusualLocation = Country != "US"
+| join kind=leftouter (historicalHours) on UserPrincipalName
+| extend UnusualHour = EasternHour >= 18
+| summarize
+   arg_max(TimeGenerated, *),
+   LocationCount = dcount(City),
+   IPCount = dcount(IPAddress),
+   UserAgentCount = dcount(UserAgent),
+   AppCount = dcount(AppDisplayName),
+   RecentLoginTimes = make_list(TimeGenerated, 10)
+   by UserPrincipalName
+| where 
+   (LocationCount > threshold_location) or
+   (IPCount > threshold_ip) or 
+   (UserAgentCount > threshold_useragent) or
+   (UnusualLocation == true) or
+   (UnusualHour == true) or
+   (isVIP == true and (IPCount > 2 or LocationCount > 1))
+| extend AbnormalityDetail = pack(
+   "VIP User", isVIP,
+   "Unusual Location", UnusualLocation,
+   "Unusual Hour", UnusualHour,
+   "Location Count", LocationCount,
+   "IP Count", IPCount,
+   "UserAgent Count", UserAgentCount,
+   "Recent Logins", RecentLoginTimes
+)
+| project 
+   TimeGenerated,
+   UserPrincipalName, 
+   IPAddress,
+   Country,
+   AbnormalityDetail,
+   AppDisplayName,
+   UserAgent,
+   ClientAppUsed,
+   DeviceDetail,
+   ConditionalAccessStatus,
+   ResourceDisplayName
