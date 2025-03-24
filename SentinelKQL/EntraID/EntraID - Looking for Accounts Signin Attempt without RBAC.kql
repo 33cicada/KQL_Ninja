@@ -3,27 +3,28 @@ let lookback = 14d;
 let threshold_location = 3;
 let threshold_ip = 10;
 let threshold_useragent = 7;
-let vipUsers = dynamic(["abc@example.com"]); // THis is just an example, replace with real VIP info
+let vipUsers = dynamic(["abc@example.com"]);
 let historicalLocations = 
-   SigninLogs
-   | where TimeGenerated between(ago(lookback) .. ago(1d))
-   | where ResultType == 0
-   | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
-   | extend Country = tostring(LocationDetails.countryOrRegion)
-   | summarize Countries = make_set(Country) by UserPrincipalName;
+    SigninLogs
+    | where TimeGenerated between(ago(lookback) .. ago(1d))
+    | where ResultType == 0
+    | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+    | extend Country = tostring(LocationDetails.countryOrRegion)
+    | summarize Countries = make_set(Country) by UserPrincipalName;
 let historicalHours = 
-   SigninLogs
-   | where TimeGenerated between(ago(lookback) .. ago(1d))
-   | where ResultType == 0
-   | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
-   | extend Hour = datetime_part("hour", TimeGenerated)
-   | summarize LoginHours = make_set(Hour) by UserPrincipalName;
+    SigninLogs
+    | where TimeGenerated between(ago(lookback) .. ago(1d))
+    | where ResultType == 0
+    | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+    | extend Hour = datetime_part("hour", TimeGenerated)
+    | summarize LoginHours = make_set(Hour) by UserPrincipalName;
 SigninLogs
-| where Identity !contains ".13" and Identity !contains ".14"
 | where TimeGenerated > ago(1d)
 | where ResultType == 0
 | extend UserPrincipalName = tostring(parse_json(Identity).userPrincipalName)
+| extend UserDisplayName = tostring(parse_json(Identity).displayName)
 | extend UserId = tostring(parse_json(Identity).userId)
+| extend Roles = tostring(parse_json(Identity).roles)
 | extend isVIP = UserPrincipalName in~ (vipUsers)
 | extend City = tostring(LocationDetails.city)
 | extend Country = tostring(LocationDetails.countryOrRegion)
@@ -32,43 +33,48 @@ SigninLogs
 | extend UserAgent = tostring(UserAgent)
 | extend Hour = datetime_part("hour", TimeGenerated)
 | extend EasternHour = ((Hour - 5) + 24) % 24
+| extend NoRoles = isempty(Roles) or Roles == "[]"
 | join kind=leftouter (historicalLocations) on UserPrincipalName
-| extend UnusualLocation = Country != "US"
+| extend UnusualLocation = Country != "XX" //Change this to the right Country Symbol
 | join kind=leftouter (historicalHours) on UserPrincipalName
 | extend UnusualHour = EasternHour >= 18
 | summarize
-   arg_max(TimeGenerated, *),
-   LocationCount = dcount(City),
-   IPCount = dcount(IPAddress),
-   UserAgentCount = dcount(UserAgent),
-   AppCount = dcount(AppDisplayName),
-   RecentLoginTimes = make_list(TimeGenerated, 10)
-   by UserPrincipalName
+    arg_max(TimeGenerated, *),
+    LocationCount = dcount(City),
+    IPCount = dcount(IPAddress),
+    UserAgentCount = dcount(UserAgent),
+    AppCount = dcount(AppDisplayName),
+    RecentLoginTimes = make_list(TimeGenerated, 10)
+    by UserPrincipalName
 | where 
-   (LocationCount > threshold_location) or
-   (IPCount > threshold_ip) or 
-   (UserAgentCount > threshold_useragent) or
-   (UnusualLocation == true) or
-   (UnusualHour == true) or
-   (isVIP == true and (IPCount > 2 or LocationCount > 1))
+    (LocationCount > threshold_location) or
+    (IPCount > threshold_ip) or 
+    (UserAgentCount > threshold_useragent) or
+    (UnusualLocation == true) or
+    (UnusualHour == true) or
+    (isVIP == true and (IPCount > 2 or LocationCount > 1)) or
+    (NoRoles == true)
 | extend AbnormalityDetail = pack(
-   "VIP User", isVIP,
-   "Unusual Location", UnusualLocation,
-   "Unusual Hour", UnusualHour,
-   "Location Count", LocationCount,
-   "IP Count", IPCount,
-   "UserAgent Count", UserAgentCount,
-   "Recent Logins", RecentLoginTimes
+    "VIP User", isVIP,
+    "Unusual Location", UnusualLocation,
+    "Unusual Hour", UnusualHour,
+    "No Roles Assigned", NoRoles,
+    "Location Count", LocationCount,
+    "IP Count", IPCount,
+    "UserAgent Count", UserAgentCount,
+    "Recent Logins", RecentLoginTimes
 )
 | project 
-   TimeGenerated,
-   UserPrincipalName, 
-   IPAddress,
-   Country,
-   AbnormalityDetail,
-   AppDisplayName,
-   UserAgent,
-   ClientAppUsed,
-   DeviceDetail,
-   ConditionalAccessStatus,
-   ResourceDisplayName
+    TimeGenerated,
+    UserDisplayName,
+    UserPrincipalName,
+    Roles,
+    IPAddress,
+    Country,
+    AbnormalityDetail,
+    AppDisplayName,
+    UserAgent,
+    ClientAppUsed,
+    DeviceDetail,
+    ConditionalAccessStatus,
+    ResourceDisplayName
