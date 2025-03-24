@@ -1,0 +1,103 @@
+// Excessive Failed MFA Attempts in Entra ID, detect high counts of failed attempts 
+let timeframe = 9d;
+let hourly_threshold = 5;
+let daily_threshold = 20;
+let critical_threshold = 50;
+let suspicious_consecutive_timeframes = 3;
+let user_baselines = 
+    SigninLogs
+    | where TimeGenerated between(ago(30d)..ago(timeframe))
+    | where AuthenticationRequirement == "multiFactorAuthentication"
+    | where ResultType != 0
+    | extend MFAResult = tostring(Status.additionalDetails)
+    | where MFAResult has_any ("MFA denied", "user declined", "did not respond", "invalid authentication")
+    | summarize 
+        AvgDailyFailures = avgif(1, true),
+        MaxHourlyFailures = maxif(1, true)
+        by UserPrincipalName, bin(TimeGenerated, 1d);
+SigninLogs 
+| where TimeGenerated > ago(timeframe) 
+| where AuthenticationRequirement == "multiFactorAuthentication" 
+| where ResultType != 0 
+| extend 
+    MFAResult = tostring(Status.additionalDetails),
+    UserAgent = tostring(UserAgent),
+    Browser = tostring(DeviceDetail.browser),
+    OS = tostring(DeviceDetail.operatingSystem)
+| where MFAResult has_any ("MFA denied", "user declined", "did not respond", "invalid authentication") 
+| extend 
+    AuthDetails = iff(isnotempty(AuthenticationDetails) and isnotnull(AuthenticationDetails), AuthenticationDetails, dynamic([])),
+    City = tostring(LocationDetails.city),
+    Country = tostring(LocationDetails.countryOrRegion)
+| extend 
+    AuthMethodInfo = iff(isnotempty(AuthDetails) and array_length(todynamic(AuthDetails)) > 0, tostring(todynamic(AuthDetails)[0].authenticationMethod), "Unknown"),
+    IsSuccessfulAuth = ResultType == 0,
+    IsMobileDevice = UserAgent has "Mobile" or OS has_any ("iOS", "Android")
+| summarize 
+    FailedAttempts = countif(true), 
+    MFAResults = make_set(MFAResult, 10), 
+    FailedMethods = make_set(AuthMethodInfo, 10), 
+    AppDisplayNames = make_set(AppDisplayName, 10), 
+    IPAddresses = make_set(IPAddress, 10), 
+    UniqueIPs = dcount(IPAddress),
+    Locations = make_set(strcat(City, ", ", Country), 10), 
+    Browsers = make_set(Browser, 5),
+    OperatingSystems = make_set(OS, 5),
+    DeviceTypes = make_set(iif(IsMobileDevice, "Mobile", "Desktop"), 2),
+    LastFailure = max(TimeGenerated) 
+    by UserPrincipalName, UserDisplayName, bin(TimeGenerated, 1h) 
+| where FailedAttempts >= hourly_threshold 
+| join kind=leftouter (user_baselines) on UserPrincipalName
+| extend 
+    BaselineDeviation = FailedAttempts / max_of(AvgDailyFailures, 1),
+    IsAnomalous = FailedAttempts > (MaxHourlyFailures * 2)
+| extend HourlyWindow = TimeGenerated
+| sort by UserPrincipalName asc, HourlyWindow asc
+| extend PrevWindow = prev(HourlyWindow, 1)
+| extend IsConsecutiveWindow = PrevWindow == datetime_add('hour', -1, HourlyWindow) and prev(UserPrincipalName, 1) == UserPrincipalName
+| summarize 
+    TotalFailures = sum(FailedAttempts),
+    MaxHourlyFailures = max(FailedAttempts),
+    ConsecutiveWindows = countif(IsConsecutiveWindow == true) + 1,
+    AllMFAResults = make_set(MFAResults),
+    AllFailedMethods = make_set(FailedMethods),
+    AllAppDisplayNames = make_set(AppDisplayNames),
+    AllIPAddresses = make_set(IPAddresses),
+    AllLocations = make_set(Locations),
+    AllBrowsers = make_set(Browsers),
+    AllOS = make_set(OperatingSystems),
+    AllDeviceTypes = make_set(DeviceTypes),
+    UniqueIPCount = max(UniqueIPs),
+    LatestFailure = max(LastFailure),
+    EarliestFailure = min(HourlyWindow),
+    IsHighlyAnomalous = max(IsAnomalous)
+    by UserPrincipalName, UserDisplayName
+| extend 
+    AttackDurationHours = datetime_diff('hour', LatestFailure, EarliestFailure) + 1,
+    IPsPerFailure = round(1.0 * UniqueIPCount / TotalFailures, 2)
+| extend RiskLevel = case(
+    TotalFailures >= critical_threshold, "Critical",
+    TotalFailures >= daily_threshold or ConsecutiveWindows >= suspicious_consecutive_timeframes, "High",
+    IsHighlyAnomalous == true, "Medium",
+    "Low"
+)
+| project 
+    LatestFailure,
+    UserDisplayName,
+    UserPrincipalName, 
+    TotalFailures, 
+    MaxHourlyFailures,
+    AttackDurationHours,
+    ConsecutiveWindows,
+    UniqueIPCount,
+    IPsPerFailure,
+    RiskLevel,
+    AllMFAResults, 
+    AllFailedMethods, 
+    AllAppDisplayNames, 
+    AllIPAddresses, 
+    AllLocations,
+    AllBrowsers,
+    AllOS,
+    AllDeviceTypes
+| order by RiskLevel asc, TotalFailures desc
