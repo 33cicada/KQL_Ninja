@@ -1,0 +1,52 @@
+//This query detects potential brute force attacks within the past hour
+let timeframe = 1h;
+let threshold = 10;
+let brute_force_error_codes = dynamic(["50053", "50126", "50055", "50056", "50076", "50089", "50057"]);
+let high_threshold = 20;
+let critical_threshold = 40;
+SigninLogs
+| where TimeGenerated >= ago(timeframe)
+| where ResultType != 0
+| where ResultType in (brute_force_error_codes)
+| extend UserPrincipalName = tolower(UserPrincipalName)
+| extend AppDisplayName = iff(isempty(AppDisplayName), "Unknown", AppDisplayName)
+| extend City = tostring(LocationDetails.city)
+| extend Country = tostring(LocationDetails.countryOrRegion)
+| extend Browser = tostring(DeviceDetail.browser)
+| extend OS = tostring(DeviceDetail.operatingSystem)
+| summarize 
+    FailedCount = count(),
+    LastFailedSignIn = max(TimeGenerated),
+    IPAddresses = make_set(IPAddress, 15),
+    UniqueIPCount = dcount(IPAddress),
+    FailedResults = make_set(ResultType, 10),
+    Locations = make_set(strcat(City, ", ", Country), 10),
+    Browsers = make_set(Browser, 5),
+    OperatingSystems = make_set(OS, 5),
+    Applications = make_set(AppDisplayName, 5)
+    by UserPrincipalName, UserId, UserDisplayName
+| where FailedCount >= threshold
+| extend AlertSeverity = case(
+    FailedCount >= critical_threshold, "Critical",
+    FailedCount >= high_threshold, "High",
+    "Medium")
+| extend AttackSignature = case(
+    UniqueIPCount > 5, "Distributed Attack",
+    UniqueIPCount <= 2, "Targeted Attack",
+    "Potential Brute Force")
+| project
+    TimeGenerated = LastFailedSignIn,
+    UserDisplayName,
+    UserPrincipalName,
+    UserId,
+    FailedCount,
+    UniqueIPCount,
+    IPAddresses,
+    Locations,
+    FailedResults,
+    Browsers,
+    OperatingSystems,
+    Applications,
+    AttackSignature,
+    AlertSeverity
+| order by FailedCount desc
