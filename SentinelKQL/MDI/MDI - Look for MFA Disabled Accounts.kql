@@ -1,0 +1,53 @@
+// This query looks for MFA disabled accounts
+let lookbackTime = 1d;
+IdentityDirectoryEvents
+| where TimeGenerated >= ago(lookbackTime)
+| where ActionType has_any (
+    "User MFA disabled",
+    "User MFA method changed",
+    "User MFA reset",
+    "Authentication policy changed"
+)
+| extend AdditionalInfo = parse_json(AdditionalFields)
+| where isnotnull(AdditionalInfo)
+// First extract ALL fields we need
+| extend
+    TargetUser = tostring(AdditionalInfo["TARGET_OBJECT.USER"]),
+    ActorAccount = tostring(AdditionalInfo["ACTOR.ACCOUNT"]),
+    ActorIP = tostring(AdditionalInfo.SourceIPAddress),
+    AdminDisplayName = tostring(AdditionalInfo.AdminDisplayName),  // Fixed: Defined before use
+    InitiatedBy = tostring(AdditionalInfo.InitiatedBy),
+    TargetDevice = tostring(AdditionalInfo.TargetDeviceName)
+// Now use the extracted fields
+| extend 
+    MFAActionType = case(
+        ActionType == "User MFA disabled", "MFA Disabled",
+        ActionType == "User MFA method changed", "MFA Method Modified",
+        ActionType == "User MFA reset", "MFA Reset",
+        ActionType == "Authentication policy changed", "Auth Policy Changed",
+        "Unknown"
+    ),
+    ModifiedBy = iff(isempty(AdminDisplayName), InitiatedBy, AdminDisplayName)  // Now works
+| join kind=leftouter (
+    ThreatIntelligenceIndicator
+    | where Active == true
+    | where TimeGenerated >= ago(30d)
+    | distinct NetworkIP, ThreatType, ConfidenceScore
+) on $left.ActorIP == $right.NetworkIP
+| project
+    TimeGenerated,
+    EventType = strcat("Suspicious MFA Modification: ", MFAActionType),
+    TargetUser,
+    Actor = ActorAccount,
+    ActorIP,
+    IsThreatIP = iff(isnotempty(NetworkIP), true, false),
+    ThreatType,
+    ConfidenceScore,
+    ModifiedBy,
+    TargetDevice,
+    AdditionalDetails = pack(
+        "OriginalActionType", ActionType,
+        "SourceApplication", tostring(AdditionalInfo.Application),
+        "Port", tostring(AdditionalInfo.Port)
+    )
+| sort by IsThreatIP desc, ConfidenceScore desc, TimeGenerated desc

@@ -1,0 +1,36 @@
+//This query detects accounts with have never expire passwords
+IdentityDirectoryEvents
+| where ActionType == "Account Password Never Expires changed"
+| extend AdditionalInfo = parse_json(AdditionalFields)
+| where isnotnull(AdditionalInfo)
+| extend 
+    OriginalValue = tobool(AdditionalInfo.['FROM Account Password Never Expires']),
+    NewValue = tobool(AdditionalInfo.['TO Account Password Never Expires']),
+    AccountUpn = tostring(AdditionalInfo.AccountUpn),
+    Application = tostring(AdditionalInfo.Application),
+    Port = tostring(AdditionalInfo.Port),
+    DestinationDeviceName = tostring(AdditionalInfo.DestinationDeviceName),
+    TargetDeviceName = tostring(AdditionalInfo.TargetDeviceName),
+    InitiatedBy = tostring(AdditionalInfo.InitiatedBy),
+    SourceIPAddress = tostring(AdditionalInfo.SourceIPAddress),
+    AdminDisplayName = tostring(AdditionalInfo.AdminDisplayName),
+    TargetEntity = tostring(AdditionalInfo["TARGET_OBJECT.ENTITY_USER"]),
+    ActionTypeInner = tostring(AdditionalInfo.ActionTypeInner),
+    Actor = tostring(AdditionalInfo["ACTOR.ACCOUNT"])
+| where NewValue == true
+| project
+    TimeGenerated,
+    AccountName,
+    ActionType = ActionTypeInner, 
+    Actor,
+    TargetEntity,
+    SourceIPAddress,
+    Port,
+    OriginalPasswordExpiryStatus = iff(OriginalValue, "Never Expires", "Expires"), 
+    NewPasswordExpiryStatus = iff(NewValue, "Never Expires", "Expires"),
+    DestinationDeviceName,
+    AdminDisplayName,
+    InitiatedBy
+| sort by TimeGenerated desc
+// Uncomment below to see the counts from each actor, it is optional
+// | summarize Count=count() by Actor, TargetEntity
